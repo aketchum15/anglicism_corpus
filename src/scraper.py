@@ -10,6 +10,7 @@ import os
 import pickle
 import time 
 import xml
+import traceback
 
 from youtube_transcript_api import YouTubeTranscriptApi, _errors as YouTubeTranscriptErrors 
 
@@ -168,6 +169,7 @@ class ChannelScraper():
 
 def save_progress(out: dict, failed: ChannelScraper|None):
 
+    print('saving progress...')
     with open(f'output/{out["id"]}.json', 'w') as f:
         json.dump(out, f, ensure_ascii=False)
 
@@ -191,6 +193,28 @@ def load_progress() -> tuple[dict, ChannelScraper]|None:
             return (out, s)
     return None
 
+def scrape_channel(s: ChannelScraper, out: dict|None = None) -> bool:
+
+    if out is None:
+        out = {'id': s.channelId, 'transcripts': []}
+
+    try:
+        for v in s: 
+            out['transcripts'].extend(v)
+    except:
+        print(f'Error occurred while scraping channel: {s.channelId}')
+        traceback.print_exc()
+        save_progress(out, s)
+        return False
+    else:
+        if not s.done:
+            print(f'Reached quota limit while scraping channel: {s.channelId}.')
+            save_progress(out, s)
+        else:
+            print(f'Finished scraping channel: {s.channelId}')
+            save_progress(out, None)
+
+        return s.done
 
 def main(file: str) -> None:
 
@@ -216,35 +240,14 @@ def main(file: str) -> None:
         except ValueError:
             print(f'Warning: saved channel id "{last.channelId}" not found in file "{file}". will continue from the beginning of channels file after scraping channel "{last.channelId}".')
 
-        # iterate
-        for v in last:
-            out['transcripts'].extend(v)
-        # if the channel still isnt finished save it off again and exit
-        if not last.done:
-            print(f'Reached quota limit while scraping channel: {last.channelId}. Saving progress...')
-            save_progress(out, last)
-            return
-        else:
-            print(f'finished scraping channel: {last.channelId}, {len(out["transcripts"])} transcripts scraped.')
+        if not scrape_channel(last, out):
+            start_index = len(channels)
 
-    failed = None
     # continue scraping channels from the file 
     for i in range(start_index, len(channels)):
-
         s = ChannelScraper(channels[i])
-        out = {'id': channels[i], 'transcripts': []}
-
-        for v in s:
-            out['transcripts'].extend(v)
-        # if the channel is not finished, save it off and exit
-        if not s.done:
-            print(f'Reached quota limit while scraping channel: {s.channelId}. Saving progress...')
-            save_progress(out, s)
-            return
-        else:
-            print(f'finished scraping channel: {s.channelId}, {len(out["transcripts"])} transcripts scraped.')
-            save_progress(out, None)
-
+        if not scrape_channel(s):
+            break;
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='Corpus Scraper')
