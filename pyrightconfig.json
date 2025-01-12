@@ -1,4 +1,4 @@
 {
-  "venvPath": "./",
-  "venv": "der_corpus"
+  "venvPath": ".env/",
+  "venv": ".env"
 }
