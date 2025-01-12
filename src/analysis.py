@@ -1,126 +1,67 @@
 from pathlib import Path
+import argparse
+import code
 import json
-import re
 import os 
-import math
+import pandas as pd
+import pickle
+import requests
+import sys
 
-#import spacy
-from pdfminer.high_level import extract_pages, LTPage
+from bs4 import BeautifulSoup
+from pdfminer.high_level import extract_pages
 
-def expand_hyphen(word: str) -> list[str]:
+from Anglicism import Anglicism
 
-    out = []
+ANGLICISIMS_PKL_PATH = 'output/anglicisms.pkl'
 
-    if '-' in word:
-        [first, second] = word.split('-', maxsplit=2)
-        out.append(first + second)
-        out.append(first + " " + second)
+def find_angilicisms(video: dict, anglicisms: list[Anglicism]):
 
-    return out 
-
-def expand_plural(word: str) -> list[str]:
-
-    out = []
-
-    if word[-1] == 'y':
-        out.append(word[:-1] + "ies")
-    else:
-        out.append(word + 's')
-
-    return out
-
-def expand_case(word: str) -> list[str]:
-
-    out = []
-
-    # Genetive
-    if word[-1] == 's':
-        out.append(word + 'es')
-    else:
-        out.append(word + 's')
-
-    # Dative
-    if word[-1] != 's':
-        out.append(word + 'n')
-
-    return out
-
-
-def expand_gender(word: str) -> list[str]:
-
-    out = []
-
-    out.append(word + 'in')
-    out.append(word + 'innen')
-    return out 
-
-
-def expand_noun(word: str) -> list[str]:
-    out = []
-
-    out.extend(expand_hyphen(word))
-    out.extend(expand_plural(word))
-    out.extend(expand_case(word))
-    out.extend(expand_gender(word))
-
-
-
-
-
-
-def calc_entropy(anglicism: str, words: list[str]) -> float:
-    #TODO: count only nouns adjectives adverbs verbs
-    # [blah ang] [blah blah ang word word]
-    # count occurences in the window
-    counts = {}
-    for word in words:
-        # skip if its the anglicism 
-        if word == anglicism:
-            continue
-        # increment if already seen
-        if word in counts.keys():
-            counts[word] += 1
-        # add if not already seen
-        else:
-            counts[word] = 1
-
-    # total number of words seen
-    total = sum(counts.values())
-    entropy = 0
-    # calculate probabilities 
-    for count in counts.values():
-        # entropy += probability * log_2(probability)
-        entropy += count/total * math.log(count/total, 2)
-
-    return -entropy
-
-def find_angilicisms(video: dict, anglicisms: list[str]):
-    #TODO: generate endings to match against
     ENTROPY_WINDOW_SIZE = 25
     result = {}
     entropies = []
-    t = video['transcript'].split()
+    transcript = video['transcript'].split()
+
+    found = []
 
     for ang in anglicisms: 
-        # ignore small ones (likely to be wrong)
-        if len(ang) < 3:
+        if not isinstance(ang, Anglicism):
+            print(f'{ang} wrong type')
+        # ignore small ones (likely to be garbage)
+        if len(ang.ang) < 3:
             continue
-        if ang in t:
-            # find index of the anglicism
-            ind = t.index(ang)
-            # clamp lower and upper bounds to not go out of the list
-            lower = max(0, ind-ENTROPY_WINDOW_SIZE)
-            upper = min(len(t), ind+ENTROPY_WINDOW_SIZE)
-            entropies.append( (ang, calc_entropy(ang, t[lower:upper])) )
-            if ang in result.keys():
-                result[ang] += 1 
-            else:
-                result[ang] = 1
 
+        # check against each form of the anglicism
+        if ang in transcript:
+            # if its found save the index in the transcript where it was
+            found.append( (ang, transcript.index(ang)) )
+
+    # sort the found list by the indicies
+    found = sorted(found, key=lambda x : x[1])
+    # calculate entropies for all found anglicisms
+    for i, (ang, index) in enumerate(found):
+        # get the anglicism that was found 
+        # calculate bounds for entropy window
+        lower = max(0, index-ENTROPY_WINDOW_SIZE)
+        upper = min(len(transcript), index+ENTROPY_WINDOW_SIZE)
+
+        # this will ensure no overlap in windows
+        # ex: [blah blah blah ang1 blah blah][ang2 blah blah blah][ang3 blah blah] 
+        if (i < len(found)-1 and found[i+1][1] < upper):
+            upper = found[i+1][1]
+
+        # calculate
+        entropies.append( (ang, ang.calc_entropy(transcript[lower:upper])) )
+        if ang.ang in result.keys():
+            result[ang.ang] += 1 
+        else:
+            result[ang.ang] = 1
+            
     return result, entropies
 
 
 def tagging():
+
     nlp = spacy.load("de_dep_news_trf")
     for p in Path("output/").glob("*.json"):
         channel = json.loads(p.read_text())
@@ -131,9 +72,33 @@ def tagging():
                 print(f'{token.text}: {token.pos_} {token.pos}')
 
 
-def scrape_pdf():
-    pdf = extract_pages('input/anglicisms.pdf')
+def scrape_website(url: str) -> set[str]:
+
+    print(f'Scraping website: {url}')
+
+    out = set()
+    # get the webpage contents.
+    html = requests.get(url).text
+    soup = BeautifulSoup(html, 'html.parser')
+    # the class for the div containing the anglicisms
+    p_tags = soup.find('div', class_='mw-body-content').find_all('p')
+    for p in p_tags[:-3]:
+        # find all the a tags in each p tag, these are where the anglicisms are 
+        a_tags = p.find_all('a', recursive=False)
+        for a in a_tags:
+            word = a.text.replace(':', '').strip()
+            out.add(word)
+
+    print(f'{len(out)} anglicisms scraped.')
+    return out 
+
+def scrape_pdf(path: str)  -> set[str]:
+
+    print(f'Scraping pdf: {path}')
+
+    pdf = extract_pages(path)
     anglicisms = set()
+
     for i, page in enumerate(pdf):
         # page number 14 is horribly formatted, page number 425 is blank.
         if i == 13 or i == 424:
@@ -166,30 +131,64 @@ def scrape_pdf():
                             anglicisms.add(word)
                         # next line 
                         break
+
+    print(f'{len(anglicisms)} anglicisms scraped.')
     return anglicisms
 
 
-def main():
-    anglicisms = []
-    if os.path.exists('output/anglicisms.txt'):
-        with open('output/anglicisms.txt', 'r') as f:
-            lines = f.readlines()
-            anglicisms = [l.strip() for l in lines]
-    else:
-        anglicisms = scrape_pdf()
-        with open('output/anglicisms.txt', 'w') as f:
-            for a in anglicisms:
-                f.write(f'{a}\n')
+def get_anglicisms() -> list[Anglicism]:
 
-    all_anglicisms = []
-    all_entropies = []
+    # anglicisms are stored as a dictionary containing the anglicism and its part of speech
+    ANGLICISIMS_PDF_PATH = 'input/anglicisms.pdf'
+    ANGLICISIMS_WEBSITE_URL = 'https://de.wiktionary.org/wiki/Verzeichnis:Deutsch/Anglizismen'
+
+    # ensure output folder exists
+    if not os.path.exists('output/'):
+        os.mkdir('output')
+
+    anglicisms: list[Anglicism] = []
+    if os.path.exists(ANGLICISIMS_PKL_PATH):
+        with open(ANGLICISIMS_PKL_PATH, 'rb') as f:
+            print('Using existing anglicisms.pkl file')
+            anglicisms = pickle.load(f)
+    else:
+        print('anglicisms.pkl not found, scraping...')
+        # get anglicisms from the pdf
+        pdf_anglicisms = scrape_pdf(ANGLICISIMS_PDF_PATH)
+        # get anglicisms from the website
+        website_anglicisms = scrape_website(ANGLICISIMS_WEBSITE_URL)
+        # merge the two sets (union ensures no repeats) and sort
+        scraped_angs = sorted(website_anglicisms.union(pdf_anglicisms))
+        for ang in scraped_angs:
+            anglicisms.append(Anglicism(ang))
+
+        print(f'{len(anglicisms)} unique anglicisms scraped.')
+
+        with open(ANGLICISIMS_PKL_PATH, 'wb') as f:
+            pickle.dump(anglicisms, f)
+        print(f'Anglicisms written to file: {ANGLICISIMS_PKL_PATH}.')
+
+    return anglicisms
+
+def get_transcripts():
+    channels = []
     for p in Path("output/").glob("*.json"):
         channel = json.loads(p.read_text())
-        transcripts = channel['transcripts']
-        print(f'channel: {channel["id"]}')
-        for t in transcripts:
-            angs, entropies = find_angilicisms(t, anglicisms)
-            all_anglicisms.append(angs)
+        channels.append(channel)
+
+    return channels
+
+def analyze():
+    all_anglicisms = []
+    all_entropies = []
+
+    angs = get_anglicisms()
+    transcripts = get_transcripts()
+    for channel in transcripts:
+        videos = channel['transcripts']
+        for v in videos:
+            found_angs, entropies = find_angilicisms(v, angs)
+            all_anglicisms.append(found_angs)
             all_entropies.append(entropies)
 
     top15_angs = sorted(all_anglicisms, key=lambda x: sum(x.values()), reverse=True)[:15]
@@ -198,8 +197,38 @@ def main():
         print("\n\nresult:")
         print(a)
         print(e)
-    #tagging()
+
+def edit():
+    angs = get_anglicisms()
+    df = pd.DataFrame([vars(a) for a in angs])
+    def save_and_exit():
+        print('Saving changes made to anglicisms')
+        angs_out = [Anglicism(ang, pos) for (ang, pos) in zip(df['ang'], df['pos'])]
+        with open(ANGLICISIMS_PKL_PATH, 'wb') as f:
+            pickle.dump(angs_out, f)
+        sys.exit(0)
+
+    l = globals().copy()
+    l.update(locals())
+    l['exit'] = save_and_exit
+    print('''
+          You are now in interactive mode, 
+          the list of anglicisms can be accessed through the variable "df". 
+          use exit() to save changes and exit, use quit() to exit without saving changes.
+          ''')
+
+    code.interact(local=l)
 
 
 if __name__ == '__main__':
-    main()
+
+    parser = argparse.ArgumentParser(prog='Corpus Analysis')
+    parser.add_argument("command", choices=["analyze", "explore"], 
+                        help="The command to execute (either 'analyze' or 'edit').")
+
+    args = parser.parse_args()
+
+    if args.command == 'analyze':
+        analyze()
+    elif args.command == 'edit':
+        edit()
