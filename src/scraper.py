@@ -1,10 +1,4 @@
-# -*- coding: utf-8 -*-
-# fuck articles pronouns 
-# most likely in nouns verbs adjectives and adverbs
-# need to do ths shit in chunks, get vid ids, meta data, transcripts, then next batch 
-
 import argparse
-import glob
 import json
 import os
 import pickle
